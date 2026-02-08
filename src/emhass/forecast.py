@@ -27,7 +27,7 @@ from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
 from emhass.retrieve_hass import RetrieveHass
-from emhass.utils import add_date_features, get_days_list, set_df_index_freq
+from emhass.utils import add_date_features, atomic_save_pickle, get_days_list, safe_load_pickle, set_df_index_freq
 
 header_accept = "application/json"
 error_msg_list_not_long_enough = "Passed data from passed list is not long enough"
@@ -951,8 +951,7 @@ class Forecast:
         if not debug:
             filename = "adjust_pv_regressor.pkl"
             filename_path = self.emhass_conf["data_path"] / filename
-            async with aiofiles.open(filename_path, "wb") as outp:
-                await outp.write(pickle.dumps(self.model_adjust_pv, pickle.HIGHEST_PROTOCOL))
+            await atomic_save_pickle(filename_path, self.model_adjust_pv, self.logger)
 
     def adjust_pv_forecast_predict(self, forecasted_pv: pd.DataFrame | None = None) -> pd.DataFrame:
         """
@@ -1404,13 +1403,10 @@ class Forecast:
         filename = model_type + "_mlf.pkl"
         filename_path = self.emhass_conf["data_path"] / filename
         if not debug:
-            if filename_path.is_file():
-                async with aiofiles.open(filename_path, "rb") as inp:
-                    content = await inp.read()
-                    mlf = pickle.loads(content)
-            else:
+            mlf = await safe_load_pickle(filename_path, self.logger, default=None)
+            if mlf is None:
                 self.logger.error(
-                    "The ML forecaster file was not found, please run a model fit method before this predict method"
+                    "The ML forecaster file was not found or is corrupted, please run a model fit method before this predict method"
                 )
                 return False
         data_last_window = None
@@ -1731,9 +1727,8 @@ class Forecast:
         :rtype: pd.DataFrame
 
         """
-        async with aiofiles.open(w_forecast_cache_path, "rb") as file:
-            content = await file.read()
-            data = pickle.loads(content)
+        data = await safe_load_pickle(w_forecast_cache_path, self.logger, default=None)
+        if data is not None:
             if not isinstance(data, pd.DataFrame) or len(data) < len(self.forecast_dates):
                 self.logger.error("There has been a error obtaining cached forecast data.")
                 self.logger.error(
@@ -1761,6 +1756,12 @@ class Forecast:
                 os.remove(w_forecast_cache_path)
                 return False
             return data
+        else:
+            self.logger.error("Cached forecast file was not found or is corrupted.")
+            self.logger.error(
+                "Try running optimization again with 'weather_forecast_cache': true, or run action `weather-forecast-cache`, to pull new data from forecast API and cache."
+            )
+            return False
 
     async def set_cached_forecast_data(self, w_forecast_cache_path, data) -> pd.DataFrame:
         r"""
@@ -1775,13 +1776,13 @@ class Forecast:
         :rtype: pd.DataFrame
 
         """
-        async with aiofiles.open(w_forecast_cache_path, "wb") as file:
-            content = pickle.dumps(data)
-            await file.write(content)
-            if not os.path.isfile(w_forecast_cache_path):
-                self.logger.warning("forecast data could not be saved to file.")
-            else:
-                self.logger.info("Saved the forecast results to cache, for later reference.")
+        from pathlib import Path
+
+        await atomic_save_pickle(Path(w_forecast_cache_path), data, self.logger)
+        if not os.path.isfile(w_forecast_cache_path):
+            self.logger.warning("forecast data could not be saved to file.")
+        else:
+            self.logger.info("Saved the forecast results to cache, for later reference.")
 
         # Trim cached data to match requested dates
         end_forecast = (self.start_forecast + self.optim_conf["delta_forecast_daily"]).replace(

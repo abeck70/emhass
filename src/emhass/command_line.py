@@ -1158,9 +1158,8 @@ async def forecast_model_fit(
     if not debug:
         filename = model_type + default_pkl_suffix
         filename_path = input_data_dict["emhass_conf"]["data_path"] / filename
-        async with aiofiles.open(filename_path, "wb") as outp:
-            await outp.write(pickle.dumps(mlf, pickle.HIGHEST_PROTOCOL))
-            logger.debug("saved model to " + str(filename_path))
+        await utils.atomic_save_pickle(filename_path, mlf, logger)
+        logger.debug("saved model to " + str(filename_path))
     return df_pred, df_pred_backtest, mlf
 
 
@@ -1196,16 +1195,14 @@ async def forecast_model_predict(
     filename = model_type + default_pkl_suffix
     filename_path = input_data_dict["emhass_conf"]["data_path"] / filename
     if not debug:
-        if filename_path.is_file():
-            async with aiofiles.open(filename_path, "rb") as inp:
-                content = await inp.read()
-                mlf = pickle.loads(content)
-                logger.debug("loaded saved model from " + str(filename_path))
+        mlf = await utils.safe_load_pickle(filename_path, logger, default=None)
+        if mlf is not None:
+            logger.debug("loaded saved model from " + str(filename_path))
         else:
             logger.error(
                 "The ML forecaster file ("
                 + str(filename_path)
-                + ") was not found, please run a model fit method before this predict method",
+                + ") was not found or is corrupted, please run a model fit method before this predict method",
             )
             return
     # Make predictions
@@ -1279,16 +1276,14 @@ async def forecast_model_tune(
     filename = model_type + default_pkl_suffix
     filename_path = input_data_dict["emhass_conf"]["data_path"] / filename
     if not debug:
-        if filename_path.is_file():
-            async with aiofiles.open(filename_path, "rb") as inp:
-                content = await inp.read()
-                mlf = pickle.loads(content)
-                logger.debug("loaded saved model from " + str(filename_path))
+        mlf = await utils.safe_load_pickle(filename_path, logger, default=None)
+        if mlf is not None:
+            logger.debug("loaded saved model from " + str(filename_path))
         else:
             logger.error(
                 "The ML forecaster file ("
                 + str(filename_path)
-                + ") was not found, please run a model fit method before this tune method",
+                + ") was not found or is corrupted, please run a model fit method before this tune method",
             )
             return None, None
     # Tune the model
@@ -1304,9 +1299,8 @@ async def forecast_model_tune(
     if not debug:
         filename = model_type + default_pkl_suffix
         filename_path = input_data_dict["emhass_conf"]["data_path"] / filename
-        async with aiofiles.open(filename_path, "wb") as outp:
-            await outp.write(pickle.dumps(mlf, pickle.HIGHEST_PROTOCOL))
-            logger.debug("Saved model to " + str(filename_path))
+        await utils.atomic_save_pickle(filename_path, mlf, logger)
+        logger.debug("Saved model to " + str(filename_path))
     return df_pred_optim, mlf
 
 
@@ -1363,8 +1357,7 @@ async def regressor_model_fit(
     if not debug:
         filename = model_type + "_mlr.pkl"
         filename_path = input_data_dict["emhass_conf"]["data_path"] / filename
-        async with aiofiles.open(filename_path, "wb") as outp:
-            await outp.write(pickle.dumps(mlr, pickle.HIGHEST_PROTOCOL))
+        await utils.atomic_save_pickle(filename_path, mlr, logger)
     return mlr
 
 
@@ -1391,13 +1384,10 @@ async def regressor_model_predict(
     filename = model_type + "_mlr.pkl"
     filename_path = input_data_dict["emhass_conf"]["data_path"] / filename
     if not debug:
-        if filename_path.is_file():
-            async with aiofiles.open(filename_path, "rb") as inp:
-                content = await inp.read()
-                mlr = pickle.loads(content)
-        else:
+        mlr = await utils.safe_load_pickle(filename_path, logger, default=None)
+        if mlr is None:
             logger.error(
-                "The ML forecaster file was not found, please run a model fit method before this predict method",
+                "The ML regressor file was not found or is corrupted, please run a model fit method before this predict method",
             )
             return False
     if "new_values" in input_data_dict["params"]["passed_data"]:

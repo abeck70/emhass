@@ -36,6 +36,7 @@ from emhass.command_line import (
 )
 from emhass.connection_manager import close_global_connection, get_websocket_client, is_connected
 from emhass.utils import (
+    atomic_save_pickle,
     build_config,
     build_legacy_config_params,
     build_params,
@@ -45,6 +46,7 @@ from emhass.utils import (
     get_injection_dict_forecast_model_tune,
     get_keys_to_mask,
     param_to_config,
+    safe_load_pickle,
 )
 
 app = Quart(__name__)
@@ -64,6 +66,11 @@ action_log_str = "action_logs.txt"
 injection_dict_file = "injection_dict.pkl"
 params_file = "params.pkl"
 error_msg_associations_file = "Unable to obtain associations file"
+
+
+# Convenience aliases for the shared pickle helpers
+_safe_load_pickle = safe_load_pickle
+_atomic_save_pickle = atomic_save_pickle
 
 
 # Add custom filter for trusted HTML content
@@ -186,15 +193,13 @@ async def index():
     app.logger.info("EMHASS server online, serving index.html...")
 
     # Load cached dict (if exists), to present generated plot tables
-    if (emhass_conf["data_path"] / injection_dict_file).exists():
-        async with aiofiles.open(str(emhass_conf["data_path"] / injection_dict_file), "rb") as fid:
-            content = await fid.read()
-            injection_dict = pickle.loads(content)
-    else:
+    injection_dict = await _safe_load_pickle(
+        emhass_conf["data_path"] / injection_dict_file, app.logger, default={}
+    )
+    if not injection_dict:
         app.logger.info(
             "The data container dictionary is empty... Please launch an optimization task"
         )
-        injection_dict = {}
 
     template = templates.get_template("index.html")
     return await make_response(template.render(injection_dict=injection_dict))
@@ -258,10 +263,11 @@ async def configuration():
     app.logger.info("serving configuration.html...")
 
     # get params
-    if (emhass_conf["data_path"] / params_file).exists():
-        async with aiofiles.open(str(emhass_conf["data_path"] / params_file), "rb") as fid:
-            content = await fid.read()
-            emhass_conf["config_path"], params = pickle.loads(content)
+    params_data = await _safe_load_pickle(
+        emhass_conf["data_path"] / params_file, app.logger, default=None
+    )
+    if params_data is not None:
+        emhass_conf["config_path"], params = params_data
     else:
         params = {}
 
@@ -277,14 +283,12 @@ async def template_action():
     """
     app.logger.info(" >> Sending rendered template data")
 
-    if (emhass_conf["data_path"] / injection_dict_file).exists():
-        async with aiofiles.open(str(emhass_conf["data_path"] / injection_dict_file), "rb") as fid:
-            content = await fid.read()
-            injection_dict = pickle.loads(content)
-    else:
-        app.logger.warning("Unable to obtain plot data from {injection_dict_file}")
+    injection_dict = await _safe_load_pickle(
+        emhass_conf["data_path"] / injection_dict_file, app.logger, default={}
+    )
+    if not injection_dict:
+        app.logger.warning(f"Unable to obtain plot data from {injection_dict_file}")
         app.logger.warning("Try running an launch an optimization task")
-        injection_dict = {}
 
     template = templates.get_template("template.html")
     return await make_response(template.render(injection_dict=injection_dict))
@@ -420,14 +424,11 @@ async def parameter_set():
 
     # Save params with updated config
     if os.path.exists(emhass_conf["data_path"]):
-        async with aiofiles.open(str(emhass_conf["data_path"] / params_file), "wb") as fid:
-            content = pickle.dumps(
-                (
-                    emhass_conf["config_path"],
-                    await build_params(emhass_conf, params_secrets, config, app.logger),
-                )
-            )
-            await fid.write(content)
+        params_data = (
+            emhass_conf["config_path"],
+            await build_params(emhass_conf, params_secrets, config, app.logger),
+        )
+        await _atomic_save_pickle(emhass_conf["data_path"] / params_file, params_data, app.logger)
     else:
         return await make_response(["Unable to save params file, missing data_path"], 500)
 
@@ -448,16 +449,15 @@ async def _load_params_and_runtime(request, emhass_conf, logger):
     costfun = "profit"
     params_path = emhass_conf["data_path"] / params_file
 
-    if params_path.exists():
-        async with aiofiles.open(str(params_path), "rb") as fid:
-            content = await fid.read()
-            emhass_conf["config_path"], params = pickle.loads(content)
-            # Set local costfun variable
-            if params.get("optim_conf") is not None:
-                costfun = params["optim_conf"].get("costfun", "profit")
-            params = orjson.dumps(params).decode()
+    params_data = await _safe_load_pickle(params_path, logger, default=None)
+    if params_data is not None:
+        emhass_conf["config_path"], params = params_data
+        # Set local costfun variable
+        if params.get("optim_conf") is not None:
+            costfun = params["optim_conf"].get("costfun", "profit")
+        params = orjson.dumps(params).decode()
     else:
-        logger.error("Unable to find params.pkl file")
+        logger.error("Unable to find or load params.pkl file")
         return None, None, None
 
     # Load runtime params
@@ -593,9 +593,7 @@ async def _handle_ml_actions(action_name, input_data_dict, emhass_conf, logger):
 
 async def _save_injection_dict(injection_dict, data_path):
     """Helper to save injection dict to pickle."""
-    async with aiofiles.open(str(data_path / injection_dict_file), "wb") as fid:
-        content = pickle.dumps(injection_dict)
-        await fid.write(content)
+    await _atomic_save_pickle(data_path / injection_dict_file, injection_dict, app.logger)
 
 
 @app.route("/action/<action_name>", methods=["POST"])
@@ -773,13 +771,9 @@ def _validate_data_path(root_path: Path) -> None:
 
 async def _load_injection_dict() -> dict | None:
     """Helper to load the injection dictionary."""
-    # Initialize this global dict
-    if (emhass_conf["data_path"] / injection_dict_file).exists():
-        async with aiofiles.open(str(emhass_conf["data_path"] / injection_dict_file), "rb") as fid:
-            content = await fid.read()
-            return pickle.loads(content)
-    else:
-        return None
+    return await _safe_load_pickle(
+        emhass_conf["data_path"] / injection_dict_file, app.logger, default=None
+    )
 
 
 async def _build_and_save_params(
@@ -795,9 +789,9 @@ async def _build_and_save_params(
     params["optim_conf"]["logging_level"] = logging_level
     # Save params to file for later reference
     if os.path.exists(str(emhass_conf["data_path"])):
-        async with aiofiles.open(str(emhass_conf["data_path"] / params_file), "wb") as fid:
-            content = pickle.dumps((config_path, params))
-            await fid.write(content)
+        await _atomic_save_pickle(
+            emhass_conf["data_path"] / params_file, (config_path, params), app.logger
+        )
     else:
         raise Exception("missing: " + str(emhass_conf["data_path"]))
     return params

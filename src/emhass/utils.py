@@ -6,7 +6,9 @@ import csv
 import logging
 import os
 import pathlib
+import pickle
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiofiles
@@ -25,6 +27,56 @@ pd.options.plotting.backend = "plotly"
 
 # Unit conversion constants
 W_TO_KW = 1000  # Watts to kilowatts conversion factor
+
+
+async def safe_load_pickle(filepath: Path, logger: logging.Logger, default=None):
+    """Safely load a pickle file, returning default on any corruption or read error.
+
+    Handles empty files, truncated writes, and deserialization errors that occur
+    when the process is interrupted mid-write (e.g., container restart, OOM kill).
+    Corrupted files are removed so EMHASS can self-heal on the next cycle.
+    """
+    if not filepath.exists():
+        return default
+    try:
+        async with aiofiles.open(str(filepath), "rb") as fid:
+            content = await fid.read()
+            if not content:
+                logger.warning(f"Empty pickle file: {filepath}, removing and using default")
+                filepath.unlink(missing_ok=True)
+                return default
+            return pickle.loads(content)
+    except (pickle.UnpicklingError, EOFError, AttributeError, ImportError, ValueError) as e:
+        logger.warning(f"Corrupted pickle file {filepath}: {e}, removing and using default")
+        try:
+            filepath.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return default
+    except Exception as e:
+        logger.error(f"Unexpected error loading pickle {filepath}: {e}, using default")
+        return default
+
+
+async def atomic_save_pickle(filepath: Path, data, logger: logging.Logger):
+    """Save data to a pickle file atomically using write-to-temp + rename.
+
+    Prevents file corruption when the process is interrupted mid-write.
+    On POSIX systems os.replace() is atomic for same-filesystem renames.
+    """
+    temp_path = filepath.parent / f".{filepath.name}.tmp"
+    try:
+        async with aiofiles.open(str(temp_path), "wb") as fid:
+            content = pickle.dumps(data)
+            await fid.write(content)
+        os.replace(str(temp_path), str(filepath))
+    except Exception as e:
+        logger.error(f"Failed to save pickle {filepath}: {e}")
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def get_root(file: str, num_parent: int = 3) -> str:
