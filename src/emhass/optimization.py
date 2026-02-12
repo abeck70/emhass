@@ -704,10 +704,11 @@ class Optimization:
         )
 
         # Final SOC Constraint
-        # The total energy change over the whole horizon must match init -> final
-        # Total Sum of power flow * dt == (Init - Final) * Capacity
+        # The total energy change over the whole horizon must not exceed init -> final
+        # Using inequality (<=) allows the optimizer to end at or above soc_final
+        # rather than being forced to drain to exactly soc_final
         total_energy_change = cp.sum(energy_change)
-        constraints.append(total_energy_change == (soc_init - soc_final) * cap)
+        constraints.append(total_energy_change <= (soc_init - soc_final) * cap)
 
         # Stress Cost
         if batt_stress_conf and batt_stress_conf["active"]:

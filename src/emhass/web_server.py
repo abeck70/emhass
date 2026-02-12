@@ -457,8 +457,22 @@ async def _load_params_and_runtime(request, emhass_conf, logger):
             costfun = params["optim_conf"].get("costfun", "profit")
         params = orjson.dumps(params).decode()
     else:
-        logger.error("Unable to find or load params.pkl file")
-        return None, None, None
+        logger.warning("params.pkl missing or corrupt, attempting to rebuild from config...")
+        try:
+            config_path = emhass_conf.get("config_path", Path("/share/config.json"))
+            defaults_path = emhass_conf.get("defaults_path", Path("/app/src/emhass/data/config_defaults.json"))
+            legacy_config_path = emhass_conf.get("legacy_config_path", Path("/app/config_emhass.yaml"))
+            config, costfun, logging_level = await _build_configuration(
+                config_path, legacy_config_path, defaults_path
+            )
+            params = await _build_and_save_params(config, costfun, logging_level, config_path)
+            logger.info("Successfully rebuilt params.pkl")
+            if params.get("optim_conf") is not None:
+                costfun = params["optim_conf"].get("costfun", "profit")
+            params = orjson.dumps(params).decode()
+        except Exception as e:
+            logger.error(f"Failed to rebuild params.pkl: {e}")
+            return None, None, None
 
     # Load runtime params
     try:
