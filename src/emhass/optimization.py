@@ -704,11 +704,11 @@ class Optimization:
         )
 
         # Final SOC Constraint
-        # The total energy change over the whole horizon must not exceed init -> final
-        # Using inequality (<=) allows the optimizer to end at or above soc_final
-        # rather than being forced to drain to exactly soc_final
+        # The total energy change over the whole horizon must match init -> final exactly.
+        # Equality gives the MILP solver a tighter LP relaxation bound, improving performance.
+        # soc_final is set dynamically based on time-of-day in the HA script.
         total_energy_change = cp.sum(energy_change)
-        constraints.append(total_energy_change <= (soc_init - soc_final) * cap)
+        constraints.append(total_energy_change == (soc_init - soc_final) * cap)
 
         # Stress Cost
         if batt_stress_conf and batt_stress_conf["active"]:

@@ -517,7 +517,11 @@ async def _handle_action_dispatch(
     if action_name == "publish-data":
         action_str = " >> Publishing data..."
         logger.info(action_str)
-        _ = await publish_data(input_data_dict, logger)
+        try:
+            _ = await publish_data(input_data_dict, logger)
+        except Exception as e:
+            logger.error(f"Publish failed (no valid optimization results?): {e}")
+            return f"EMHASS >> Action publish-data failed: {e}\n", 400
         return "EMHASS >> Action publish-data executed... \n", 201
 
     # Mapping for optimization actions to their functions
@@ -531,6 +535,9 @@ async def _handle_action_dispatch(
         action_str = f" >> Performing {action_name}..."
         logger.info(action_str)
         opt_res = await optim_actions[action_name](input_data_dict, logger)
+        if opt_res is None or opt_res.empty or "P_PV" not in opt_res.columns:
+            logger.error(f"Optimization {action_name} failed to produce valid results")
+            return f"EMHASS >> Action {action_name} failed: no valid results\n", 400
         injection_dict = get_injection_dict(opt_res)
         await _save_injection_dict(injection_dict, emhass_conf["data_path"])
         return f"EMHASS >> Action {action_name} executed... \n", 201
