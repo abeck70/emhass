@@ -183,6 +183,12 @@ async def clear_file_log():
             await fp.write("")
 
 
+@app.route("/health")
+async def health():
+    """Lightweight health check endpoint — responds immediately without I/O."""
+    return await make_response({"status": "ok"}, 200)
+
+
 @app.route("/")
 @app.route("/index")
 async def index():

@@ -858,8 +858,12 @@ async def perfect_forecast_optim(
     )
     if isinstance(df_input_data, bool) and not df_input_data:
         return False
-    opt_res = input_data_dict["opt"].perform_perfect_forecast_optim(
-        df_input_data, input_data_dict["days_list"]
+    loop = asyncio.get_running_loop()
+    opt_res = await loop.run_in_executor(
+        None,
+        lambda: input_data_dict["opt"].perform_perfect_forecast_optim(
+            df_input_data, input_data_dict["days_list"]
+        ),
     )
     # Save CSV file for analysis
     if save_data_to_file:
@@ -1004,21 +1008,30 @@ async def dayahead_forecast_optim(
     )
     if isinstance(df_input_data_dayahead, bool) and not df_input_data_dayahead:
         return False
-    opt_res_dayahead = input_data_dict["opt"].perform_dayahead_forecast_optim(
-        df_input_data_dayahead,
-        input_data_dict["p_pv_forecast"],
-        input_data_dict["p_load_forecast"],
+    loop = asyncio.get_running_loop()
+    opt_res_dayahead = await loop.run_in_executor(
+        None,
+        lambda: input_data_dict["opt"].perform_dayahead_forecast_optim(
+            df_input_data_dayahead,
+            input_data_dict["p_pv_forecast"],
+            input_data_dict["p_load_forecast"],
+        ),
     )
-    # Save CSV file for publish_data
+    # Save CSV file for publish_data — only if optimization succeeded
     if save_data_to_file:
         today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         filename = "opt_res_dayahead_" + today.strftime("%Y_%m_%d") + ".csv"
     else:  # Just save the latest optimization results
         filename = default_csv_filename
-    if not debug:
+    if not debug and "P_PV" in opt_res_dayahead.columns:
         opt_res_dayahead.to_csv(
             input_data_dict["emhass_conf"]["data_path"] / filename,
             index_label="timestamp",
+        )
+    elif not debug:
+        logger.warning(
+            "Skipping CSV save: optimization result is invalid (no P_PV column). "
+            "Previous valid results (if any) are preserved."
         )
 
     if not isinstance(input_data_dict["params"], dict):
@@ -1080,28 +1093,37 @@ async def naive_mpc_optim(
     def_end_timestep = input_data_dict["params"]["optim_conf"][
         "end_timesteps_of_each_deferrable_load"
     ]
-    opt_res_naive_mpc = input_data_dict["opt"].perform_naive_mpc_optim(
-        df_input_data_dayahead,
-        input_data_dict["p_pv_forecast"],
-        input_data_dict["p_load_forecast"],
-        prediction_horizon,
-        soc_init,
-        soc_final,
-        def_total_hours,
-        def_total_timestep,
-        def_start_timestep,
-        def_end_timestep,
+    loop = asyncio.get_running_loop()
+    opt_res_naive_mpc = await loop.run_in_executor(
+        None,
+        lambda: input_data_dict["opt"].perform_naive_mpc_optim(
+            df_input_data_dayahead,
+            input_data_dict["p_pv_forecast"],
+            input_data_dict["p_load_forecast"],
+            prediction_horizon,
+            soc_init,
+            soc_final,
+            def_total_hours,
+            def_total_timestep,
+            def_start_timestep,
+            def_end_timestep,
+        ),
     )
-    # Save CSV file for publish_data
+    # Save CSV file for publish_data — only if optimization succeeded
     if save_data_to_file:
         today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         filename = "opt_res_naive_mpc_" + today.strftime("%Y_%m_%d") + ".csv"
     else:  # Just save the latest optimization results
         filename = default_csv_filename
-    if not debug:
+    if not debug and "P_PV" in opt_res_naive_mpc.columns:
         opt_res_naive_mpc.to_csv(
             input_data_dict["emhass_conf"]["data_path"] / filename,
             index_label="timestamp",
+        )
+    elif not debug:
+        logger.warning(
+            "Skipping CSV save: optimization result is invalid (no P_PV column). "
+            "Previous valid results (if any) are preserved."
         )
 
     if not isinstance(input_data_dict["params"], dict):
@@ -1655,6 +1677,12 @@ async def _publish_standard_forecasts(
 ) -> list[str]:
     """Publish PV, Load, Curtailment, and Hybrid Inverter data."""
     cols = []
+    if "P_PV" not in opt_res_latest.columns:
+        ctx.logger.error(
+            "Cannot publish: optimization results are missing 'P_PV'. "
+            "The last optimization likely failed — run a successful optimization first."
+        )
+        raise KeyError("P_PV")
     # PV Forecast
     custom_pv = ctx.params["passed_data"]["custom_pv_forecast_id"]
     await ctx.rh.post_data(
