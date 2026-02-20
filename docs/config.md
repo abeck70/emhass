@@ -64,12 +64,39 @@ These are the parameters needed to properly define the optimization problem.
 - `operating_hours_of_each_deferrable_load`: The total number of hours that each deferrable load should operate. For example:
 	- 5
 	- 8
-- `start_timesteps_of_each_deferrable_load`: The timestep as from which each deferrable load is allowed to operate (if you don't want the deferrable load to use the whole optimization time window). If you specify a value of 0 (or negative), the deferrable load will be optimized as from the beginning of the complete prediction horizon window. For example:
-    - 0
-    - 1 
-- `end_timesteps_of_each_deferrable_load`: The timestep before which each deferrable load should operate. The deferrable load is not allowed to operate after the specified time step. If a value of 0 (or negative) is provided, the deferrable load is allowed to operate in the complete optimization window). For example:
-	- 0
-	- 3
+- `start_timesteps_of_each_deferrable_load`: A list of integers defining the **earliest time step index** from which each deferrable load is allowed to start consuming power.
+	- **Value type:** Integer (Index of the time step, *not* the hour).
+	- **Default/Disable:** If a value of **0** (or negative) is provided, the constraint is disabled, and the load is allowed to start immediately from the beginning of the optimization window (Index 0).
+	- Example: With a `30 min` (0.5h) time step:
+		- `0`: Can start immediately (00:00).
+		- `4`: Can start after 2 hours (02:00).
+
+```{note} 
+
+Since `start_timesteps` are relative indexes starting from 0 (the moment the optimization begins), they are heavily dependent on your optimization launch time. So the index is relative to the start of the optimization window (Launch Time = Index 0).
+Example: 
+- Launch at 7:00 AM, allowed to start at 9:00 AM (2h delay).
+- Time step 30 min.
+- Value = 2 hours / 0.5 = 4.
+```
+
+- `end_timesteps_of_each_deferrable_load`: A list of integers defining the **deadline time step index** by which each deferrable load must stop consuming power. The load is strictly forbidden from operating at or after this time step.
+	- **Value type:** Integer (Index of the time step).
+	- **Default/Disable:** If a value of **0** (or negative) is provided, the constraint is disabled, and the load is allowed to operate up until the very end of the prediction horizon (e.g., the full 24h window).
+	- Example: With a `30 min` (0.5h) time step:
+		- `0`: Can run anytime until the end of the horizon.
+		- `21`: Must finish strictly before timestep 21 (i.e., must stop by 10.5 hours / 10:30 AM).
+
+```{note} 
+
+Since `end_timesteps` are relative indexes starting from 0 (the moment the optimization begins), they are heavily dependent on your optimization launch time. So the index is relative to the start of the optimization window.
+Example: 
+- Launch at 7:00 AM, must finish by 6:00 PM (18:00).
+- Duration = 11 hours.
+- Time step 30 min.
+- Value = 11 hours / 0.5 = 22.
+```
+
 - `treat_deferrable_load_as_semi_cont`: Define if we should treat each deferrable load as a semi-continuous variable. Semi-continuous variables (`True`) are variables that must take a value that can be either their maximum or minimum/zero (for example On = Maximum load, Off = 0 W). Non semi-continuous (which means continuous) variables (`False`) can take any values between their maximum and minimum. For example:
 	- True
 	- True
@@ -101,13 +128,13 @@ For all the forecast methods (`weather`, `load_power`, `load_cost` and `producti
 ```
 - `photovoltaic_production_sell_price`: The paid price for energy injected to the grid from excedent PV production in €/kWh. Defaults to 0.065. This parameter is only needed if production_price_forecast_method='constant'.
 - `set_total_pv_sell`: Set this parameter to true to consider that all the PV power produced is injected to the grid. No direct self-consumption. The default is false, for a system with direct self-consumption.
-- `set_use_adjusted_pv`: Set to True to enable machine learning-based PV forecast adjustment. This uses historical data to train a regression model that corrects PV forecasts based on local conditions. Defaults to False. See the [forecasts documentation](https://emhass.readthedocs.io/en/latest/forecasts.html#adjusting-pv-forecasts-using-machine-learning) for more details.
+- `set_use_adjusted_pv`: Set to True to enable machine learning-based PV forecast adjustment. This uses historical data to train a regression model that corrects PV forecasts based on local conditions. Defaults to False. See the [Forecasts](https://emhass.readthedocs.io/en/latest/forecasts.html#adjusting-pv-forecasts-using-machine-learning) section for more details.
 - `adjusted_pv_regression_model`: The regression model to use for PV forecast adjustment. See `REGRESSION_METHODS` in `machine_learning_regressor.py` for the authoritative list. Currently available: 'LinearRegression', 'RidgeRegression', 'LassoRegression' (default), 'ElasticNet', 'KNeighborsRegressor', 'DecisionTreeRegressor', 'SVR', 'RandomForestRegressor', 'ExtraTreesRegressor', 'GradientBoostingRegressor', 'AdaBoostRegressor', 'MLPRegressor'. Only used when `set_use_adjusted_pv` is True.
 - `adjusted_pv_solar_elevation_threshold`: The solar elevation threshold in degrees below which the adjusted PV forecast is set to zero. This prevents negative or unrealistic values during low sun angles. Defaults to 10.
 - `adjusted_pv_model_max_age`: Maximum age in hours before the adjusted PV regression model is re-fitted. If the saved model is older than this value, a new model will be trained using fresh historical data. Set to 0 to force re-fitting on every call. Defaults to 24 hours (1 day). This caching mechanism significantly reduces API calls to Home Assistant and speeds up optimization runs.
-- `lp_solver`: Set the name of the linear programming solver that will be used. Defaults to 'COIN_CMD'. The options are 'PULP_CBC_CMD', 'GLPK_CMD', 'HiGHS', and 'COIN_CMD'.
-- `lp_solver_path`: Set the path to the LP solver. Defaults to '/usr/bin/cbc'. 
 - `num_threads`: Set the number of threads to pass to LP solvers that support specifying a number of threads. Defaults to 0 (auto-detect).
+- `lp_solver_timeout`: Maximum time in seconds the solver is allowed to run before stopping. Defaults to 45.
+- `lp_solver_mip_rel_gap`: MIP (Mixed-Integer Programming) relative gap tolerance. For problems with binary variables (semi-continuous loads, single-constant loads, etc.), the solver will stop when it finds a solution within this percentage of the optimal. A value of 0.05 (5%) means the solver stops when the solution is guaranteed to be within 5% of optimal. Higher values solve faster with minimal quality impact. Recommended: 0.05 for ~2x speedup with negligible quality loss. Defaults to 0 (exact optimal) for backward compatibility.
 - `set_nocharge_from_grid`: Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV.
 - `set_nodischarge_to_grid`: Set this to true if you want to forbid discharging battery power to the grid.
 - `set_battery_dynamic`: Set a power dynamic limiting condition to the battery power. This is an additional constraint on the battery dynamic in power per unit of time, which allows you to set a percentage of the battery's nominal full power as the maximum power allowed for (dis)charge.
