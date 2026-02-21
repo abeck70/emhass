@@ -2112,36 +2112,36 @@ class Optimization:
             # Start with bound constraints
             constraints = self.constraints[:]
 
-            # Setup Stress Costs
-            inv_stress_conf = None
-            batt_stress_conf = None
+            # Setup Stress Costs (stored on self for reuse in relaxed fallback)
+            self._inv_stress_conf = None
+            self._batt_stress_conf = None
 
             if self.optim_conf["set_use_battery"]:
                 p_batt_max = max(
                     self.plant_conf.get("battery_discharge_power_max", 0),
                     self.plant_conf.get("battery_charge_power_max", 0),
                 )
-                batt_stress_conf = self._setup_stress_cost(
+                self._batt_stress_conf = self._setup_stress_cost(
                     "battery_stress_cost", p_batt_max, "battery"
                 )
-                if batt_stress_conf["active"]:
-                    self.vars["batt_stress_cost"] = batt_stress_conf["vars"]
+                if self._batt_stress_conf["active"]:
+                    self.vars["batt_stress_cost"] = self._batt_stress_conf["vars"]
 
             if self.plant_conf["inverter_is_hybrid"]:
                 P_nom_inverter_max = max(
                     self.plant_conf.get("inverter_ac_output_max", 0),
                     self.plant_conf.get("inverter_ac_input_max", 0),
                 )
-                inv_stress_conf = self._setup_stress_cost(
+                self._inv_stress_conf = self._setup_stress_cost(
                     "inverter_stress_cost", P_nom_inverter_max, "inv"
                 )
-                if inv_stress_conf["active"]:
-                    self.vars["inv_stress_cost"] = inv_stress_conf["vars"]
+                if self._inv_stress_conf["active"]:
+                    self.vars["inv_stress_cost"] = self._inv_stress_conf["vars"]
 
             # Add Constraints
             self._add_main_power_balance_constraints(constraints)
-            self._add_hybrid_inverter_constraints(constraints, inv_stress_conf)
-            self._add_battery_constraints(constraints, batt_stress_conf)
+            self._add_hybrid_inverter_constraints(constraints, self._inv_stress_conf)
+            self._add_battery_constraints(constraints, self._batt_stress_conf)
 
             if self.plant_conf["compute_curtailment"]:
                 constraints.append(self.vars["p_pv_curtailment"] <= self.param_pv_forecast)
@@ -2169,8 +2169,8 @@ class Optimization:
 
             # Build Objective
             objective_expr = self._build_objective_function(
-                batt_stress_conf,
-                inv_stress_conf,
+                self._batt_stress_conf,
+                self._inv_stress_conf,
             )
 
             # Add penalty term if it exists (not 0)
@@ -2281,10 +2281,10 @@ class Optimization:
             # Re-apply main constraints
             self._add_main_power_balance_constraints(constraints_relaxed)
             # (Note: We reuse previous stress configs as they don't change with relaxation)
-            if inv_stress_conf:
-                self._add_hybrid_inverter_constraints(constraints_relaxed, inv_stress_conf)
-            if batt_stress_conf:
-                self._add_battery_constraints(constraints_relaxed, batt_stress_conf)
+            if self._inv_stress_conf:
+                self._add_hybrid_inverter_constraints(constraints_relaxed, self._inv_stress_conf)
+            if self._batt_stress_conf:
+                self._add_battery_constraints(constraints_relaxed, self._batt_stress_conf)
 
             if self.plant_conf["compute_curtailment"]:
                 constraints_relaxed.append(self.vars["p_pv_curtailment"] <= self.param_pv_forecast)
@@ -2310,7 +2310,7 @@ class Optimization:
             )
 
             # Re-build Objective
-            objective_expr = self._build_objective_function(batt_stress_conf, inv_stress_conf)
+            objective_expr = self._build_objective_function(self._batt_stress_conf, self._inv_stress_conf)
             if not isinstance(penalty_terms_total, int) or penalty_terms_total != 0:
                 objective_expr.args[0] += penalty_terms_total
 

@@ -1,0 +1,4 @@
+{
+  "lp_solver_timeout": 45,
+  "lp_solver_mip_rel_gap": 0.05
+}
