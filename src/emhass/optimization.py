@@ -1122,11 +1122,13 @@ class Optimization:
 
         constraints.append(predicted_temp[0] == start_temperature)
 
-        heat_factor = (heating_rate * self.time_step) / nominal_power
+        # S = 1 for heating (power increases temp), -1 for cooling (power decreases temp)
+        sense_direction = 1 if sense == "heat" else -1
+        heat_factor = sense_direction * (heating_rate * self.time_step) / nominal_power
         cool_factor = cooling_constant * self.time_step
 
         # Main Dynamics (Delayed Power)
-        # T[t+1] depends on T[t] and P[t-L]
+        # T[t+1] = T[t] + S * P[t-L] * (α_h * Δt / P_nom) - γ_c * Δt * (T[t] - T_out[t])
         constraints.append(
             predicted_temp[1 + L :]
             == predicted_temp[L:-1]
