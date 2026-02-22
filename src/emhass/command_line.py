@@ -2255,8 +2255,10 @@ async def _publish_thermal_loads(ctx: PublishContext, opt_res_latest: pd.DataFra
     for k in range(ctx.optim_conf["number_of_deferrable_loads"]):
         if k >= len(def_load_config):
             continue
-        load_cfg = def_load_config[k]
-        if "thermal_config" not in load_cfg and "thermal_battery" not in load_cfg:
+        load_cfg = def_load_config[k] if isinstance(def_load_config[k], dict) else {}
+        has_thermal = "thermal_config" in load_cfg or "thermal_battery" in load_cfg
+        col_name_t = f"predicted_temp_heater{k}"
+        if not has_thermal and col_name_t not in opt_res_latest.columns:
             continue
         col_t = await _publish_thermal_variable(
             ctx.rh,

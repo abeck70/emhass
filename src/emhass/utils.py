@@ -1036,10 +1036,25 @@ async def treat_runtimeparams(
         # Parsing the thermal model parameters
         # Load the default config
         if "def_load_config" in runtimeparams:
-            params["optim_conf"]["def_load_config"] = runtimeparams["def_load_config"]
-            params["optim_conf"]["number_of_deferrable_loads"] = len(
-                runtimeparams["def_load_config"]
-            )
+            runtime_def = runtimeparams["def_load_config"]
+            existing_def = params["optim_conf"].get("def_load_config") or []
+            merged = []
+            for k, r_cfg in enumerate(runtime_def):
+                if not isinstance(r_cfg, dict):
+                    merged.append(r_cfg)
+                    continue
+                merged_cfg = dict(r_cfg)
+                # If runtime sent empty thermal_config/thermal_battery, keep existing
+                # so optim and publish still have full thermal config (predicted temp).
+                if k < len(existing_def) and isinstance(existing_def[k], dict):
+                    for key in ("thermal_config", "thermal_battery"):
+                        if not (merged_cfg.get(key)):
+                            existing_val = existing_def[k].get(key)
+                            if existing_val:
+                                merged_cfg[key] = existing_val
+                merged.append(merged_cfg)
+            params["optim_conf"]["def_load_config"] = merged
+            params["optim_conf"]["number_of_deferrable_loads"] = len(merged)
         if "def_load_config" in params["optim_conf"]:
             for k in range(len(params["optim_conf"]["def_load_config"])):
                 if "thermal_config" in params["optim_conf"]["def_load_config"][k]:
