@@ -781,13 +781,14 @@ class Optimization:
         # SOC Final Deviation Penalty
         # Steers the solution toward the exact soc_final target within the tolerance band.
         # The penalty weight is scaled relative to the average price to be meaningful but
-        # not overwhelming. Uses a quadratic penalty for smooth gradient.
+        # not overwhelming. Uses absolute value penalty (linear) to stay compatible with
+        # LP/MILP solvers like HiGHS (cp.square would create a SOCP that HiGHS can't solve).
         if self.optim_conf["set_use_battery"] and hasattr(self, "_soc_deviation"):
             soc_penalty_weight = self.optim_conf.get("weight_soc_final_deviation", 0.01)
             # Normalize by capacity so the penalty is scale-independent
             cap = self.plant_conf["battery_nominal_energy_capacity"]
             normalized_deviation = self._soc_deviation / cap
-            objective_terms.append(-soc_penalty_weight * cp.square(normalized_deviation))
+            objective_terms.append(-soc_penalty_weight * cp.abs(normalized_deviation))
 
         # Stress Costs
         # These variables represent a cost to be minimized.
