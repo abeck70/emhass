@@ -30,6 +30,85 @@ default_metadata_json = "metadata.json"
 test_df_literal = "test_df_final.pkl"
 
 
+def _log_infeasibility_fingerprint(
+    input_data_dict: dict, logger: logging.Logger, action_name: str = "naive-mpc-optim"
+) -> None:
+    """Log a compact payload fingerprint when optimization is invalid/infeasible.
+
+    Helps reproduce the run offline; avoids logging full forecast arrays.
+    """
+    try:
+        params = input_data_dict.get("params") or {}
+        passed = params.get("passed_data") or {}
+        optim = params.get("optim_conf") or {}
+        fingerprint = {
+            "soc_init": passed.get("soc_init"),
+            "soc_final": passed.get("soc_final"),
+            "def_total_hours": optim.get("operating_hours_of_each_deferrable_load"),
+            "prediction_horizon": passed.get("prediction_horizon"),
+            "len_load_cost_forecast": (
+                len(passed["load_cost_forecast"])
+                if isinstance(passed.get("load_cost_forecast"), list)
+                else None
+            ),
+            "len_prod_price_forecast": (
+                len(passed["prod_price_forecast"])
+                if isinstance(passed.get("prod_price_forecast"), list)
+                else None
+            ),
+            "len_pv_power_forecast": (
+                len(passed["pv_power_forecast"])
+                if isinstance(passed.get("pv_power_forecast"), list)
+                else None
+            ),
+            "len_load_power_forecast": (
+                len(passed["load_power_forecast"])
+                if isinstance(passed.get("load_power_forecast"), list)
+                else None
+            ),
+            "len_outdoor_temperature_forecast": (
+                len(passed["outdoor_temperature_forecast"])
+                if isinstance(passed.get("outdoor_temperature_forecast"), list)
+                else None
+            ),
+        }
+        def_load_config = passed.get("def_load_config") or []
+        if def_load_config and isinstance(def_load_config, list):
+            for i, cfg in enumerate(def_load_config):
+                if not isinstance(cfg, dict):
+                    continue
+                tc = cfg.get("thermal_config") or {}
+                if tc:
+                    min_t = tc.get("min_temperatures") or []
+                    max_t = tc.get("max_temperatures") or []
+                    fingerprint[f"def_load_{i}_start_temperature"] = tc.get(
+                        "start_temperature"
+                    )
+                    fingerprint[f"def_load_{i}_len_min_temperatures"] = (
+                        len(min_t) if isinstance(min_t, list) else None
+                    )
+                    fingerprint[f"def_load_{i}_len_max_temperatures"] = (
+                        len(max_t) if isinstance(max_t, list) else None
+                    )
+                    if isinstance(min_t, list) and min_t:
+                        fingerprint[f"def_load_{i}_min_temps_first_last"] = (
+                            min_t[0],
+                            min_t[-1],
+                        )
+                    if isinstance(max_t, list) and max_t:
+                        fingerprint[f"def_load_{i}_max_temps_first_last"] = (
+                            max_t[0],
+                            max_t[-1],
+                        )
+        logger.info(
+            "Infeasibility fingerprint for %s (reproduce with this payload): %s",
+            action_name,
+            fingerprint,
+        )
+    except Exception as e:
+        logger.debug("Could not build infeasibility fingerprint: %s", e)
+
+
 @dataclass
 class SetupContext:
     """
@@ -1498,6 +1577,9 @@ async def naive_mpc_optim(
         logger.warning(
             "Skipping CSV save: optimization result is invalid (no P_PV column). "
             "Previous valid results (if any) are preserved."
+        )
+        _log_infeasibility_fingerprint(
+            input_data_dict, logger, action_name="naive-mpc-optim"
         )
 
     if not isinstance(input_data_dict["params"], dict):

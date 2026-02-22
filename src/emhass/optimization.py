@@ -1512,8 +1512,14 @@ class Optimization:
         def_init_temp,
         min_power_of_deferrable_loads,
         p_load,
+        skip_thermal_constraints: bool = False,
     ):
-        """Master helper for all deferrable load constraints (Vectorized)."""
+        """Master helper for all deferrable load constraints (Vectorized).
+
+        When skip_thermal_constraints is True, thermal loads get only power bounds
+        (no min/max temperature constraints). Used for infeasibility diagnostics
+        and optional thermal-relaxed fallback.
+        """
         p_deferrable = self.vars["p_deferrable"]
         p_def_bin1 = self.vars["p_def_bin1"]
         p_def_start = self.vars["p_def_start"]
@@ -1588,12 +1594,24 @@ class Optimization:
                 and len(self.optim_conf["def_load_config"]) > k
                 and "thermal_config" in self.optim_conf["def_load_config"][k]
             ):
-                pred_temp, _, penalty_term = self._add_thermal_load_constraints(
-                    constraints, k, data_opt, def_init_temp
-                )
-                predicted_temps[k] = pred_temp
-                if penalty_term is not None:
-                    penalty_terms_total += penalty_term
+                if skip_thermal_constraints:
+                    # No min/max temperature constraints (diagnostic or fallback).
+                    constraints.append(p_deferrable[k] >= 0)
+                    constraints.append(p_deferrable[k] <= M)
+                    if k < len(self.param_window_masks):
+                        nominal_power = self.optim_conf["nominal_power_of_deferrable_loads"][k]
+                        if isinstance(nominal_power, list):
+                            nominal_power = max(nominal_power)
+                        constraints.append(
+                            p_deferrable[k] <= nominal_power * self.param_window_masks[k]
+                        )
+                else:
+                    pred_temp, _, penalty_term = self._add_thermal_load_constraints(
+                        constraints, k, data_opt, def_init_temp
+                    )
+                    predicted_temps[k] = pred_temp
+                    if penalty_term is not None:
+                        penalty_terms_total += penalty_term
 
             # Thermal Battery Load
             elif (
@@ -2425,15 +2443,104 @@ class Optimization:
             self.optim_conf["treat_deferrable_load_as_semi_cont"] = original_semi_cont
             self.optim_conf["set_deferrable_load_single_constant"] = original_single_const
 
+            # Optional: diagnose or fallback when relaxed LP also failed
+            diagnose = self.optim_conf.get("diagnose_infeasibility", False)
+            allow_thermal_relax = self.optim_conf.get(
+                "allow_thermal_relaxation_on_infeasible", False
+            )
+            if diagnose or allow_thermal_relax:
+                # Build problem without thermal min/max constraints
+                constraints_no_thermal = self.constraints[:]
+                for var_key, _ in original_vars.items():
+                    if isinstance(var_key, tuple):
+                        container, k_idx = var_key
+                        constraints_no_thermal.append(
+                            self.vars[container][k_idx] <= 1
+                        )
+                    elif var_key in self.vars:
+                        constraints_no_thermal.append(self.vars[var_key] <= 1)
+                self._add_main_power_balance_constraints(constraints_no_thermal)
+                if self._inv_stress_conf:
+                    self._add_hybrid_inverter_constraints(
+                        constraints_no_thermal, self._inv_stress_conf
+                    )
+                if self._batt_stress_conf:
+                    self._add_battery_constraints(
+                        constraints_no_thermal, self._batt_stress_conf
+                    )
+                if self.plant_conf["compute_curtailment"]:
+                    constraints_no_thermal.append(
+                        self.vars["p_pv_curtailment"] <= self.param_pv_forecast
+                    )
+                if self.costfun == "self-consumption" and "SC" in self.vars:
+                    constraints_no_thermal.append(
+                        self.vars["SC"] <= self.param_pv_forecast
+                    )
+                    constraints_no_thermal.append(
+                        self.vars["SC"]
+                        <= self.param_load_forecast + self.vars["p_def_sum"]
+                    )
+                self.predicted_temps, self.heating_demands, penalty_no_therm = (
+                    self._add_deferrable_load_constraints(
+                        constraints_no_thermal,
+                        data_opt,
+                        def_total_hours,
+                        def_total_timestep,
+                        def_start_timestep,
+                        def_end_timestep,
+                        def_init_temp,
+                        min_power_of_deferrable_loads,
+                        p_load,
+                        skip_thermal_constraints=True,
+                    )
+                )
+                obj_no_therm = self._build_objective_function(
+                    self._batt_stress_conf, self._inv_stress_conf
+                )
+                if not isinstance(penalty_no_therm, int) or penalty_no_therm != 0:
+                    obj_no_therm.args[0] += penalty_no_therm
+                prob_no_thermal = cp.Problem(obj_no_therm, constraints_no_thermal)
+                try:
+                    prob_no_thermal.solve(solver=selected_solver, **solver_opts)
+                    if prob_no_thermal.status in [
+                        cp.OPTIMAL,
+                        cp.OPTIMAL_INACCURATE,
+                    ]:
+                        if diagnose:
+                            self.logger.info(
+                                "Diagnostic: problem without thermal constraints "
+                                "is feasible (thermal constraints likely cause of infeasibility)."
+                            )
+                        if allow_thermal_relax:
+                            self.prob = prob_no_thermal
+                            self.prob._status = "Optimal (thermal relaxed)"
+                            self.logger.warning(
+                                "Using result with thermal comfort constraints relaxed."
+                            )
+                    else:
+                        if diagnose:
+                            self.logger.info(
+                                "Diagnostic: problem without thermal constraints "
+                                "is still infeasible (cause is elsewhere)."
+                            )
+                except Exception as e:
+                    if diagnose:
+                        self.logger.warning(
+                            "Diagnostic solve without thermal failed: %s", e
+                        )
+
         # Fix for Status Case: Map "optimal" -> "Optimal"
-        status_raw = self.prob.status
+        status_raw = getattr(self.prob, "_status", None) or self.prob.status
         self.optim_status = status_raw.title() if status_raw else "Failure"
+        if self.optim_status == "Optimal (Thermal Relaxed)":
+            self.optim_status = "Optimal (thermal relaxed)"
 
         # Helper: Ensure we return "Optimal" for tests if it was "Optimal (Relaxed)" or "Optimal_Inaccurate"
         if self.prob.value is None or self.prob.status not in [
             cp.OPTIMAL,
             cp.OPTIMAL_INACCURATE,
             "Optimal (Relaxed)",
+            "Optimal (thermal relaxed)",
         ]:
             self.logger.warning("Cost function cannot be evaluated or Infeasible/Unbounded")
 

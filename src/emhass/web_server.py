@@ -20,6 +20,7 @@ from quart import Quart, make_response, request
 from quart import logging as log
 
 from emhass.command_line import (
+    _log_infeasibility_fingerprint,
     continual_publish,
     dayahead_forecast_optim,
     export_influxdb_to_csv,
@@ -543,6 +544,9 @@ async def _handle_action_dispatch(
         opt_res = await optim_actions[action_name](input_data_dict, logger)
         if opt_res is None or opt_res.empty or "P_PV" not in opt_res.columns:
             logger.error(f"Optimization {action_name} failed to produce valid results")
+            _log_infeasibility_fingerprint(
+                input_data_dict, logger, action_name=action_name
+            )
             return f"EMHASS >> Action {action_name} failed: no valid results\n", 400
         injection_dict = get_injection_dict(opt_res)
         await _save_injection_dict(injection_dict, emhass_conf["data_path"])
