@@ -765,6 +765,51 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(opt_res, pd.DataFrame)
         self.assertEqual(opt_res.isnull().sum().sum(), 0)
 
+    # Replay infeasible MPC payload (when present) to reproduce locally
+    async def test_replay_infeasible_mpc_payload(self):
+        """If data/infeasible_mpc_payload.json exists (saved from a failed run), run naive-mpc-optim to reproduce."""
+        payload_file = emhass_conf["data_path"] / "infeasible_mpc_payload.json"
+        if not payload_file.exists():
+            self.skipTest(
+                "No data/infeasible_mpc_payload.json: copy from EMHASS data_path after an infeasible run to reproduce."
+            )
+        with open(payload_file) as f:
+            payload_json = f.read()
+        params = await TestCommandLineAsyncUtils.get_test_params(set_use_pv=True)
+        params_json = orjson.dumps(params).decode("utf-8")
+        input_data_dict = await set_input_data_dict(
+            emhass_conf,
+            "profit",
+            params_json,
+            payload_json,
+            "naive-mpc-optim",
+            logger,
+            get_data_from_file=True,
+        )
+        self.assertIsNotNone(input_data_dict, "set_input_data_dict should succeed with saved payload")
+        opt_res = await naive_mpc_optim(input_data_dict, logger, debug=True)
+        self.assertIsInstance(opt_res, pd.DataFrame)
+        # Reproduce infeasibility: expect no valid plan (no P_PV) or thermal-relaxed fallback
+        if "P_PV" not in opt_res.columns:
+            self.assertIn(
+                "optim_status",
+                opt_res.columns,
+                "Result should have optim_status when infeasible",
+            )
+            status = opt_res["optim_status"].iloc[0]
+            self.assertIn(
+                status,
+                ("Infeasible", "infeasible", "Failure", "Optimal (thermal relaxed)"),
+                f"Expected infeasible or thermal-relaxed status, got {status}",
+            )
+        else:
+            status = opt_res["optim_status"].iloc[0]
+            self.assertIn(
+                status,
+                ("Optimal", "Optimal (Relaxed)", "Optimal (thermal relaxed)"),
+                f"Expected optimal status when P_PV present, got {status}",
+            )
+
     # CLI test naive mpc optimzation action
     async def test_main_naive_mpc_optim(self):
         with patch(

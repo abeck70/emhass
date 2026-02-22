@@ -547,6 +547,17 @@ async def _handle_action_dispatch(
             _log_infeasibility_fingerprint(
                 input_data_dict, logger, action_name=action_name
             )
+            # Save payload for local pytest replay (copy to tests/data/infeasible_mpc_payload.json)
+            try:
+                payload_path = emhass_conf.get("data_path", Path("/data"))
+                if isinstance(payload_path, str):
+                    payload_path = Path(payload_path)
+                out_file = payload_path / "infeasible_mpc_payload.json"
+                with open(out_file, "w") as f:
+                    f.write(runtimeparams)
+                logger.info("Saved payload to %s for pytest replay", out_file)
+            except Exception as e:
+                logger.debug("Could not save infeasible payload: %s", e)
             return f"EMHASS >> Action {action_name} failed: no valid results\n", 400
         injection_dict = get_injection_dict(opt_res)
         await _save_injection_dict(injection_dict, emhass_conf["data_path"])
