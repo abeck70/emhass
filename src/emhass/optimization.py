@@ -778,6 +778,17 @@ class Optimization:
                     term = -scale * penalty * nominal_power * total_startup_cost
                     objective_terms.append(term)
 
+        # SOC Final Deviation Penalty
+        # Steers the solution toward the exact soc_final target within the tolerance band.
+        # The penalty weight is scaled relative to the average price to be meaningful but
+        # not overwhelming. Uses a quadratic penalty for smooth gradient.
+        if self.optim_conf["set_use_battery"] and hasattr(self, "_soc_deviation"):
+            soc_penalty_weight = self.optim_conf.get("weight_soc_final_deviation", 0.01)
+            # Normalize by capacity so the penalty is scale-independent
+            cap = self.plant_conf["battery_nominal_energy_capacity"]
+            normalized_deviation = self._soc_deviation / cap
+            objective_terms.append(-soc_penalty_weight * cp.square(normalized_deviation))
+
         # Stress Costs
         # These variables represent a cost to be minimized.
         # Since we are Maximizing the objective, we subtract them.
@@ -1033,11 +1044,24 @@ class Optimization:
         )
 
         # Final SOC Constraint
-        # The total energy change over the whole horizon must match init -> final exactly.
-        # Equality gives the MILP solver a tighter LP relaxation bound, improving performance.
+        # Uses an inequality band instead of strict equality to prevent infeasible
+        # optimizations when other constraints (thermal, inverter, grid) create a tight
+        # feasible region. A penalty term in the objective steers the solution toward
+        # the target SOC.
+        #
         # soc_final is set dynamically based on time-of-day in the HA script.
+        # soc_final_tolerance (default 0.05 = 5%) sets the allowed band width.
         total_energy_change = cp.sum(energy_change)
-        constraints.append(total_energy_change == (soc_init - soc_final) * cap)
+        soc_target_energy = (soc_init - soc_final) * cap
+        soc_tolerance = self.optim_conf.get("soc_final_tolerance", 0.05)
+        soc_tolerance_energy = soc_tolerance * cap
+
+        # Allow SOC to end within [target - tolerance, target + tolerance]
+        constraints.append(total_energy_change >= soc_target_energy - soc_tolerance_energy)
+        constraints.append(total_energy_change <= soc_target_energy + soc_tolerance_energy)
+
+        # Soft penalty: steer toward exact target (added to objective in _build_objective_function)
+        self._soc_deviation = total_energy_change - soc_target_energy
 
         # Stress Cost
         if batt_stress_conf and batt_stress_conf["active"]:
@@ -2277,8 +2301,63 @@ class Optimization:
             self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False] * n_def
             self.optim_conf["set_deferrable_load_single_constant"] = [False] * n_def
 
+            # True LP Relaxation: Replace binary variables with continuous [0,1]
+            # This is critical - the original fallback kept boolean variables, making
+            # it still a MILP that fails for the same reasons as the original.
+            original_vars = {}
+            binary_var_names = ["D", "E"]
+            if self.plant_conf["inverter_is_hybrid"]:
+                binary_var_names.append("is_dc_sourcing")
+            for k in range(n_def):
+                binary_var_names.extend([f"p_def_bin1_{k}", f"p_def_start_{k}", f"p_def_bin2_{k}"])
+
+            for var_name in binary_var_names:
+                var_key = var_name.split("_")[0] if var_name in ["D", "E"] else None
+                # Map display names to self.vars keys
+                if var_name == "D":
+                    var_key = "D"
+                elif var_name == "E":
+                    var_key = "E"
+                elif var_name == "is_dc_sourcing":
+                    var_key = "is_dc_sourcing"
+                elif var_name.startswith("p_def_bin1_"):
+                    k_idx = int(var_name.split("_")[-1])
+                    original_vars[("p_def_bin1", k_idx)] = self.vars["p_def_bin1"][k_idx]
+                    relaxed = cp.Variable(n, nonneg=True, name=f"{var_name}_relaxed")
+                    self.vars["p_def_bin1"][k_idx] = relaxed
+                    continue
+                elif var_name.startswith("p_def_start_"):
+                    k_idx = int(var_name.split("_")[-1])
+                    original_vars[("p_def_start", k_idx)] = self.vars["p_def_start"][k_idx]
+                    relaxed = cp.Variable(n, nonneg=True, name=f"{var_name}_relaxed")
+                    self.vars["p_def_start"][k_idx] = relaxed
+                    continue
+                elif var_name.startswith("p_def_bin2_"):
+                    k_idx = int(var_name.split("_")[-1])
+                    original_vars[("p_def_bin2", k_idx)] = self.vars["p_def_bin2"][k_idx]
+                    relaxed = cp.Variable(n, nonneg=True, name=f"{var_name}_relaxed")
+                    self.vars["p_def_bin2"][k_idx] = relaxed
+                    continue
+
+                if var_key and var_key in self.vars:
+                    original_vars[var_key] = self.vars[var_key]
+                    relaxed = cp.Variable(n, nonneg=True, name=f"{var_key}_relaxed")
+                    self.vars[var_key] = relaxed
+
+            self.logger.info(
+                f"True LP relaxation: replaced {len(original_vars)} binary variables with continuous [0,1]"
+            )
+
             # Re-build Constraints (Clean Slate)
             constraints_relaxed = self.constraints[:]  # Start with base bound constraints
+
+            # Add [0,1] bounds for relaxed binary variables
+            for var_key, _ in original_vars.items():
+                if isinstance(var_key, tuple):
+                    container, k_idx = var_key
+                    constraints_relaxed.append(self.vars[container][k_idx] <= 1)
+                elif var_key in self.vars:
+                    constraints_relaxed.append(self.vars[var_key] <= 1)
 
             # Re-apply main constraints
             self._add_main_power_balance_constraints(constraints_relaxed)
@@ -2319,7 +2398,7 @@ class Optimization:
             # Solve Relaxed Problem
             prob_relaxed = cp.Problem(objective_expr, constraints_relaxed)
             try:
-                self.logger.info("Solving relaxed problem (LP)...")
+                self.logger.info("Solving relaxed problem (true LP relaxation)...")
                 prob_relaxed.solve(solver=selected_solver, **solver_opts)
 
                 if prob_relaxed.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
@@ -2335,7 +2414,13 @@ class Optimization:
             except Exception as e:
                 self.logger.error(f"Relaxed optimization crashed: {e}")
 
-            # 5. Restore Configuration
+            # Restore original binary variables and configuration
+            for var_key, original_var in original_vars.items():
+                if isinstance(var_key, tuple):
+                    container, k_idx = var_key
+                    self.vars[container][k_idx] = original_var
+                elif var_key in self.vars:
+                    self.vars[var_key] = original_var
             self.optim_conf["treat_deferrable_load_as_semi_cont"] = original_semi_cont
             self.optim_conf["set_deferrable_load_single_constant"] = original_single_const
 

@@ -114,5 +114,7 @@
   "battery_maximum_state_of_charge": 0.9,
   "battery_target_state_of_charge": 0.6,
   "battery_stress_cost": 0.0,
-  "battery_stress_segments": 10
+  "battery_stress_segments": 10,
+  "soc_final_tolerance": 0.05,
+  "weight_soc_final_deviation": 0.01
 }
