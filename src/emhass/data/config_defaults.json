@@ -118,5 +118,6 @@
   "soc_final_tolerance": 0.05,
   "weight_soc_final_deviation": 0.01,
   "diagnose_infeasibility": false,
-  "allow_thermal_relaxation_on_infeasible": false
+  "allow_thermal_relaxation_on_infeasible": false,
+  "weight_thermal_comfort": 10.0
 }

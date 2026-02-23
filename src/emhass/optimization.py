@@ -1168,54 +1168,63 @@ class Optimization:
                 == predicted_temp[:L] - (cool_factor * (predicted_temp[:L] - outdoor_temp[:L]))
             )
 
-        # Min/Max Temperature Constraints
-        # Only add constraints if config actually specifies min/max temps
+        # Min/Max Temperature Constraints (soft — slack variables allow violation with penalty)
         # Skip index 0 (already constrained by start_temperature)
         min_temps_config = hc.get("min_temperatures", [])
         max_temps_config = hc.get("max_temperatures", [])
+        weight_thermal = self.optim_conf.get("weight_thermal_comfort", 1.0)
+
+        thermal_comfort_penalty = 0
 
         if min_temps_config:
-            if min_temps_param is not None:
-                # Use parameter (allows warm-start updates), but only for valid config indices
-                valid_indices = [
-                    i
-                    for i, v in enumerate(min_temps_config)
-                    if v is not None and i < required_len and i > 0
-                ]
-                if valid_indices:
+            valid_indices = [
+                i
+                for i, v in enumerate(min_temps_config)
+                if v is not None and i < required_len and i > 0
+            ]
+            if valid_indices:
+                temp_under = cp.Variable(len(valid_indices), nonneg=True, name=f"temp_under_{k}")
+                if min_temps_param is not None:
                     constraints.append(
-                        predicted_temp[valid_indices] >= min_temps_param[valid_indices]
+                        predicted_temp[valid_indices] >= min_temps_param[valid_indices] - temp_under
                     )
-            else:
-                valid_indices = [
-                    i
-                    for i, v in enumerate(min_temps_config)
-                    if v is not None and i < required_len and i > 0
-                ]
-                if valid_indices:
+                else:
                     limit_vals = np.array([min_temps_config[i] for i in valid_indices])
-                    constraints.append(predicted_temp[valid_indices] >= limit_vals)
+                    constraints.append(predicted_temp[valid_indices] >= limit_vals - temp_under)
+                thermal_comfort_penalty += weight_thermal * cp.sum(temp_under)
 
         if max_temps_config:
-            if max_temps_param is not None:
-                valid_indices = [
-                    i
-                    for i, v in enumerate(max_temps_config)
-                    if v is not None and i < required_len and i > 0
-                ]
-                if valid_indices:
+            valid_indices = [
+                i
+                for i, v in enumerate(max_temps_config)
+                if v is not None and i < required_len and i > 0
+            ]
+            if valid_indices:
+                temp_over = cp.Variable(len(valid_indices), nonneg=True, name=f"temp_over_{k}")
+                if max_temps_param is not None:
                     constraints.append(
-                        predicted_temp[valid_indices] <= max_temps_param[valid_indices]
+                        predicted_temp[valid_indices] <= max_temps_param[valid_indices] + temp_over
                     )
-            else:
-                valid_indices = [
-                    i
-                    for i, v in enumerate(max_temps_config)
-                    if v is not None and i < required_len and i > 0
-                ]
-                if valid_indices:
+                else:
                     limit_vals = np.array([max_temps_config[i] for i in valid_indices])
-                    constraints.append(predicted_temp[valid_indices] <= limit_vals)
+                    constraints.append(predicted_temp[valid_indices] <= limit_vals + temp_over)
+                thermal_comfort_penalty += weight_thermal * cp.sum(temp_over)
+
+        # Optional: soft minimum cooling when outdoor exceeds comfort max (cooling loads only)
+        min_cooling_when_hot = hc.get("minimum_cooling_power_when_outdoor_above_max", 0)
+        if (
+            min_cooling_when_hot > 0
+            and sense == "cool"
+            and max_temps_config
+        ):
+            outdoor_arr = self._get_clean_outdoor_temp(data_opt, required_len)
+            max_arr = self._pad_temp_array(max_temps_config, required_len, 26.0)
+            hot_indices = [t for t in range(1, required_len) if outdoor_arr[t] > max_arr[t]]
+            if hot_indices:
+                cooling_deficit = cp.Variable(len(hot_indices), nonneg=True, name=f"cooling_deficit_{k}")
+                for j, t in enumerate(hot_indices):
+                    constraints.append(p_deferrable[t] + cooling_deficit[j] >= min_cooling_when_hot)
+                thermal_comfort_penalty += weight_thermal * cp.sum(cooling_deficit)
 
         # Overshoot Logic
         penalty_expr = 0
@@ -1267,6 +1276,9 @@ class Optimization:
             constraints.append(p_deferrable == p_def_bin2 * nominal_power)
 
         total_penalty = cp.sum(penalty_expr) if not isinstance(penalty_expr, int) else 0
+        # Subtract soft thermal comfort penalty (objective is Maximized, so penalty must be negative)
+        if not isinstance(thermal_comfort_penalty, int) or thermal_comfort_penalty != 0:
+            total_penalty = total_penalty - thermal_comfort_penalty
         return predicted_temp, None, total_penalty
 
     def _add_thermal_battery_constraints(self, constraints, k, data_opt, p_load):
@@ -1840,6 +1852,31 @@ class Optimization:
             p_def_k = get_val(self.vars["p_deferrable"][k])
             opt_tp[f"P_deferrable{k}"] = p_def_k
             p_def_sum += p_def_k
+            # Diagnostic: thermal cooling load with all-zero AC
+            def_cfg = (self.optim_conf.get("def_load_config") or [])
+            if (
+                k < len(def_cfg)
+                and def_cfg[k]
+                and def_cfg[k].get("thermal_config", {}).get("sense") == "cool"
+                and np.all(p_def_k == 0)
+            ):
+                pred = predicted_temps.get(k)
+                if pred is not None:
+                    temp_vals = get_val(pred)
+                    hc = def_cfg[k]["thermal_config"]
+                    min_t = np.array(hc.get("min_temperatures", [])[: self.num_timesteps])
+                    max_t = np.array(hc.get("max_temperatures", [])[: self.num_timesteps])
+                    n_show = min(8, len(temp_vals))
+                    self.logger.warning(
+                        "Thermal cooling load %s: P_deferrable is zero for full horizon. "
+                        "Predicted temp (first %s): %s; min_temps: %s; max_temps: %s. "
+                        "If indoor would exceed max in reality, increase cooling_constant or check outdoor_temperature_forecast.",
+                        k,
+                        n_show,
+                        np.round(temp_vals[:n_show], 2).tolist(),
+                        min_t[:n_show].tolist() if len(min_t) >= n_show else min_t.tolist(),
+                        max_t[:n_show].tolist() if len(max_t) >= n_show else max_t.tolist(),
+                    )
 
         # Battery Results
         if self.optim_conf["set_use_battery"]:
